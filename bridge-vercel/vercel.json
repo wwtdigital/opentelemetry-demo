@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "routes": [
+    { "src": "/webhook/splunk", "dest": "/api/webhook/splunk" },
+    { "src": "/health", "dest": "/api/health" },
+    { "src": "/status", "dest": "/api/status" }
+  ]
+}
