@@ -194,7 +194,7 @@ func loadProductsFromDB(ctx context.Context) ([]*pb.Product, error) {
 	// Query all products with categories
 	rows, err := db.QueryContext(ctx, `
 		SELECT p.id, p.name, p.description, p.picture, 
-		       p.price_currency_code, p.price_units, p.price_nanos, p.categories
+		       p.price_currency_code, p.price_unit, p.price_nanos, p.categories
 		FROM catalog.products p
 		ORDER BY p.id
 	`)
@@ -361,7 +361,7 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 		msg := "Error: Product Catalog Fail Feature Flag Enabled"
 		span.SetStatus(otelcodes.Error, msg)
 		span.AddEvent(msg)
-		return nil, status.Errorf(codes.Internal, msg)
+		return nil, status.Errorf(codes.Internal, "%s", msg)
 	}
 
 	found, err := getProductFromDB(ctx, req.Id)
@@ -369,7 +369,7 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 		msg := fmt.Sprintf("Product Not Found: %s", req.Id)
 		span.SetStatus(otelcodes.Error, msg)
 		span.AddEvent(msg)
-		return nil, status.Errorf(codes.NotFound, msg)
+		return nil, status.Errorf(codes.NotFound, "%s", msg)
 	}
 
 	span.AddEvent("Product Found")
