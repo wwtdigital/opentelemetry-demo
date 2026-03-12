@@ -253,7 +253,7 @@ func getProductFromDB(ctx context.Context, productID string) (*pb.Product, error
 
 	var id, name, description, picture, currencyCode, categoriesStr string
 	var units int64
-	var nanos int32
+	var nanos int64
 
 	if err := row.Scan(&id, &name, &description, &picture, &currencyCode, &units, &nanos, &categoriesStr); err != nil {
 		if err == sql.ErrNoRows {
@@ -262,7 +262,7 @@ func getProductFromDB(ctx context.Context, productID string) (*pb.Product, error
 		return nil, fmt.Errorf("failed to scan product row: %w", err)
 	}
 
-	return parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, nanos), nil
+	return parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, int32(nanos)), nil
 }
 
 func getProductsFromRows(ctx context.Context, rows *sql.Rows) ([]*pb.Product, error) {
@@ -271,13 +271,13 @@ func getProductsFromRows(ctx context.Context, rows *sql.Rows) ([]*pb.Product, er
 	for rows.Next() {
 		var id, name, description, picture, currencyCode, categoriesStr string
 		var units int64
-		var nanos int32
+		var nanos int64
 
 		if err := rows.Scan(&id, &name, &description, &picture, &currencyCode, &units, &nanos, &categoriesStr); err != nil {
 			return nil, fmt.Errorf("failed to scan product row: %w", err)
 		}
 
-		products = append(products, parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, nanos))
+		products = append(products, parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, int32(nanos)))
 	}
 
 	if err := rows.Err(); err != nil {
