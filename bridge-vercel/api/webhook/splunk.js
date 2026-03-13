@@ -62,12 +62,13 @@ async function fetchSplunkErrorContext(service) {
   const headers = { "X-SF-TOKEN": SPLUNK_API_TOKEN, "Content-Type": "application/json" };
 
   try {
-    // Find which operations are producing errors for this service
+    // Query ALL error MTS for this service (spans, traces, service.request)
+    // to get operation-level breakdown, not just the aggregate service metric
     const mtsQuery = encodeURIComponent(
-      `sf_metric:service.request.count AND sf_service:${service} AND sf_error:true`
+      `sf_service:${service} AND sf_error:true`
     );
     const mtsResp = await fetch(
-      `${baseUrl}/v2/metrictimeseries?query=${mtsQuery}&limit=20`,
+      `${baseUrl}/v2/metrictimeseries?query=${mtsQuery}&limit=100`,
       { headers }
     );
     if (!mtsResp.ok) {
@@ -78,26 +79,28 @@ async function fetchSplunkErrorContext(service) {
     const results = mtsData.results || [];
     if (results.length === 0) return null;
 
-    // Extract unique operations, endpoints, and error types
+    // Extract operations, span kinds, metrics, and error signals
     const operations = new Set();
-    const endpoints = new Set();
+    const spanKinds = new Set();
+    const metrics = new Set();
     const errorTypes = new Set();
-    const httpMethods = new Set();
     for (const mts of results) {
       const dims = mts.dimensions || {};
       if (dims.sf_operation) operations.add(dims.sf_operation);
-      if (dims.sf_endpoint) endpoints.add(dims.sf_endpoint);
-      if (dims.sf_httpMethod) httpMethods.add(dims.sf_httpMethod);
+      if (dims.sf_kind) spanKinds.add(dims.sf_kind);
       if (dims["exception.type"]) errorTypes.add(dims["exception.type"]);
       if (dims["rpc.grpc.status_code"]) errorTypes.add(`gRPC:${dims["rpc.grpc.status_code"]}`);
       if (dims["http.response.status_code"]) errorTypes.add(`HTTP:${dims["http.response.status_code"]}`);
+      // Track which metrics have error data (spans.count, traces.count, etc.)
+      const metric = mts.metric || dims.sf_metric;
+      if (metric && !metric.includes("histogram") && !metric.includes("_S1")) metrics.add(metric);
     }
 
     const context = {
       operations: [...operations],
-      endpoints: [...endpoints],
+      spanKinds: [...spanKinds],
+      metrics: [...metrics],
       errorTypes: [...errorTypes],
-      httpMethods: [...httpMethods],
       mtsCount: results.length,
     };
     console.log(`Splunk enrichment for ${service}:`, JSON.stringify(context));
@@ -113,14 +116,13 @@ function formatSplunkContext(ctx) {
   const lines = [];
   if (ctx.operations.length > 0)
     lines.push(`Failing operations: ${ctx.operations.join(", ")}`);
-  if (ctx.endpoints.length > 0)
-    lines.push(`Failing endpoints: ${ctx.endpoints.join(", ")}`);
+  if (ctx.spanKinds && ctx.spanKinds.length > 0)
+    lines.push(`Span kinds: ${ctx.spanKinds.join(", ")}`);
   if (ctx.errorTypes.length > 0)
     lines.push(`Error types: ${ctx.errorTypes.join(", ")}`);
-  if (ctx.httpMethods.length > 0)
-    lines.push(`HTTP methods: ${ctx.httpMethods.join(", ")}`);
-  if (ctx.mtsCount)
-    lines.push(`Active error metric time series: ${ctx.mtsCount}`);
+  if (ctx.metrics && ctx.metrics.length > 0)
+    lines.push(`Error metrics present: ${ctx.metrics.join(", ")}`);
+  lines.push(`Total error MTS: ${ctx.mtsCount}`);
   return lines.length > 0 ? lines.join("\n") : "No error breakdown available.";
 }
 

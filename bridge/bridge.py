@@ -88,10 +88,10 @@ def _fetch_splunk_error_context(service: str) -> dict | None:
     try:
         import urllib.parse
         mts_query = urllib.parse.quote(
-            f"sf_metric:service.request.count AND sf_service:{service} AND sf_error:true"
+            f"sf_service:{service} AND sf_error:true"
         )
         resp = requests.get(
-            f"{base_url}/v2/metrictimeseries?query={mts_query}&limit=20",
+            f"{base_url}/v2/metrictimeseries?query={mts_query}&limit=100",
             headers=headers, timeout=10,
         )
         if not resp.ok:
@@ -103,29 +103,30 @@ def _fetch_splunk_error_context(service: str) -> dict | None:
             return None
 
         operations: set[str] = set()
-        endpoints: set[str] = set()
+        span_kinds: set[str] = set()
+        metrics: set[str] = set()
         error_types: set[str] = set()
-        http_methods: set[str] = set()
         for mts in results:
             dims = mts.get("dimensions", {})
             if dims.get("sf_operation"):
                 operations.add(dims["sf_operation"])
-            if dims.get("sf_endpoint"):
-                endpoints.add(dims["sf_endpoint"])
-            if dims.get("sf_httpMethod"):
-                http_methods.add(dims["sf_httpMethod"])
+            if dims.get("sf_kind"):
+                span_kinds.add(dims["sf_kind"])
             if dims.get("exception.type"):
                 error_types.add(dims["exception.type"])
             if dims.get("rpc.grpc.status_code"):
                 error_types.add(f"gRPC:{dims['rpc.grpc.status_code']}")
             if dims.get("http.response.status_code"):
                 error_types.add(f"HTTP:{dims['http.response.status_code']}")
+            metric = mts.get("metric") or dims.get("sf_metric", "")
+            if metric and "histogram" not in metric and "_S1" not in metric:
+                metrics.add(metric)
 
         ctx = {
             "operations": sorted(operations),
-            "endpoints": sorted(endpoints),
+            "span_kinds": sorted(span_kinds),
+            "metrics": sorted(metrics),
             "error_types": sorted(error_types),
-            "http_methods": sorted(http_methods),
             "mts_count": len(results),
         }
         log.info("Splunk enrichment for %s: %s", service, json.dumps(ctx))
@@ -141,14 +142,13 @@ def _format_splunk_context(ctx: dict | None) -> str:
     lines: list[str] = []
     if ctx["operations"]:
         lines.append(f"Failing operations: {', '.join(ctx['operations'])}")
-    if ctx["endpoints"]:
-        lines.append(f"Failing endpoints: {', '.join(ctx['endpoints'])}")
+    if ctx.get("span_kinds"):
+        lines.append(f"Span kinds: {', '.join(ctx['span_kinds'])}")
     if ctx["error_types"]:
         lines.append(f"Error types: {', '.join(ctx['error_types'])}")
-    if ctx["http_methods"]:
-        lines.append(f"HTTP methods: {', '.join(ctx['http_methods'])}")
-    if ctx.get("mts_count"):
-        lines.append(f"Active error metric time series: {ctx['mts_count']}")
+    if ctx.get("metrics"):
+        lines.append(f"Error metrics present: {', '.join(ctx['metrics'])}")
+    lines.append(f"Total error MTS: {ctx['mts_count']}")
     return "\n".join(lines) if lines else "No error breakdown available."
 
 
