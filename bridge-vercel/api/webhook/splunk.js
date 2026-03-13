@@ -141,7 +141,9 @@ function buildDevinPrompt({
 }) {
   const dimensionsJson = JSON.stringify(dimensions || {}, null, 2);
 
-  return `## Production Alert
+  return `!productionbugfix
+
+## Production Alert
 
 **Source:** ${source}
 **Detector:** ${detectorName || "unknown"}
@@ -180,7 +182,6 @@ async function dispatchToDevin(prompt) {
     body: JSON.stringify({
       prompt,
       idempotent: true,
-      ...(DEVIN_PLAYBOOK_ID ? { playbook_id: DEVIN_PLAYBOOK_ID } : {}),
     }),
   });
 
