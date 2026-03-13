@@ -300,27 +300,35 @@ export default async function handler(req, res) {
   const data = req.body || {};
   console.log("Received webhook from Splunk:", JSON.stringify(data, null, 2));
 
+  // Skip clear/ok events — only process fire events
+  const status = (data.status || "").toLowerCase();
+  if (status === "ok" || status === "stopped" || status === "manually resolved") {
+    console.log(`Skipping non-fire event (status=${data.status})`);
+    return res.status(200).json({ status: "skipped", reason: `alert status: ${data.status}` });
+  }
+
   // Extract fields from Splunk detector payload
   const severity = data.severity || "Unknown";
   const detector = data.detector || "";
-  const description = data.description || "";
+  const description = data.description || data.messageBody || "";
   const incidentId = data.incidentId || "";
 
-  // Extract service name from inputs dimensions
+  // Extract service name and dimensions from inputs, falling back to top-level dimensions
   let service = "unknown";
   let errorText = description;
-  let dimensions = {};
+  let dimensions = data.dimensions || {};
   let triggerValue = "";
   const inputs = data.inputs || [];
   if (Array.isArray(inputs) && inputs.length > 0 && typeof inputs[0] === "object") {
-    const dims = inputs[0].dimensions || {};
-    dimensions = dims;
-    service = dims.sf_service || dims["service.name"] || "unknown";
+    const inputDims = inputs[0].dimensions || {};
+    // Merge input dimensions into top-level dimensions
+    dimensions = { ...dimensions, ...inputDims };
     triggerValue = inputs[0].value || "";
     if (triggerValue) {
       errorText = `${description}\nTriggering value: ${triggerValue}`;
     }
   }
+  service = dimensions.sf_service || dimensions["service.name"] || "unknown";
 
   const alertId =
     incidentId ||
