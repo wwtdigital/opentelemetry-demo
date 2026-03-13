@@ -10,7 +10,7 @@ import { Redis } from "@upstash/redis";
 // ---------------------------------------------------------------------------
 const DEVIN_API_KEY = process.env.DEVIN_API_KEY || "";
 const DEVIN_ORG_ID = process.env.DEVIN_ORG_ID || "";
-const DEVIN_PLAYBOOK_ID = process.env.DEVIN_PLAYBOOK_ID || "";
+const DEVIN_PLAYBOOK_ID = (process.env.DEVIN_PLAYBOOK_ID || "").trim();
 const REPO_URL = process.env.REPO_URL || "";
 const SPLUNK_WEBHOOK_SECRET = process.env.SPLUNK_WEBHOOK_SECRET || "";
 const SPLUNK_API_TOKEN = process.env.SPLUNK_API_TOKEN || "";
@@ -270,6 +270,7 @@ async function dispatchToDevin(prompt) {
     body: JSON.stringify({
       prompt,
       idempotent: true,
+      advanced_mode: "create",
       ...(DEVIN_PLAYBOOK_ID ? { playbook_id: DEVIN_PLAYBOOK_ID } : {}),
     }),
   });
