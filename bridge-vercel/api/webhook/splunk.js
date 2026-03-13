@@ -236,14 +236,16 @@ async function processAlert({
   dimensions,
   triggerValue,
 }) {
-  const h = await errorHash(service, errorText);
-  const dedupKey = `bridge:dispatched:${h}`;
+  // Use incidentId for dedup — same across all firings (initial + reminders)
+  // of one incident, unique per genuinely new incident
+  const dedupKey = `bridge:dispatched:${alertId}`;
 
   if (await isDuplicate(dedupKey)) {
-    console.log(`Duplicate alert (hash=${h}) for ${service} — skipping`);
-    return { status: "duplicate", error_hash: h };
+    console.log(`Duplicate alert (incidentId=${alertId}) for ${service} — skipping`);
+    return { status: "duplicate", incident_id: alertId };
   }
 
+  const h = await errorHash(service, errorText);
   const errorType = errorText ? errorText.split("\n")[0].slice(0, 60) : "unknown";
   const branch = branchName(service, errorType, h);
   const timestamp = new Date().toISOString();
@@ -270,14 +272,14 @@ async function processAlert({
 
   if (!devinResp.error) {
     await markDispatched(dedupKey);
-    console.log(`Hash ${h} marked as dispatched (fire-once-ever)`);
+    console.log(`Incident ${alertId} marked as dispatched (fire-once-per-incident)`);
   } else {
-    console.warn(`Dispatch failed for hash ${h} — will allow retry on next alert`);
+    console.warn(`Dispatch failed for incident ${alertId} — will allow retry on next firing`);
   }
 
   return {
     status: devinResp.error ? "dispatch_failed" : "dispatched",
-    error_hash: h,
+    incident_id: alertId,
     branch,
     devin: devinResp,
   };
