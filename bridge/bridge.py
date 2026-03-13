@@ -167,9 +167,7 @@ def _build_devin_prompt(
 ) -> str:
     dimensions_json = json.dumps(dimensions or {}, indent=2, sort_keys=True)
 
-    return f"""!productionbugfix
-
-## Production Alert
+    return f"""## Production Alert
 
 **Source:** {source}
 **Detector:** {detector_name or "unknown"}
@@ -212,6 +210,8 @@ def _dispatch_to_devin(prompt: str, branch: str) -> dict:
         "prompt": prompt,
         "idempotent": True,
     }
+    if DEVIN_PLAYBOOK_ID:
+        payload["playbook_id"] = DEVIN_PLAYBOOK_ID
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
