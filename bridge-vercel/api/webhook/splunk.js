@@ -196,30 +196,52 @@ async function dispatchToDevin(prompt) {
 }
 
 // ---------------------------------------------------------------------------
-// KV helpers (fire-once-ever dedup)
+// KV helpers — incident → session mapping with 24h TTL
 // ---------------------------------------------------------------------------
 
-async function isDuplicate(key) {
-  if (!redis) {
-    console.warn("KV not configured — dedup disabled, allowing dispatch");
-    return false;
-  }
+const INCIDENT_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+
+async function getIncidentSession(incidentId) {
+  if (!redis) return null;
   try {
-    const exists = await redis.exists(key);
-    return exists >= 1;
+    return await redis.get(`bridge:incident:${incidentId}`);
   } catch (err) {
-    console.error("KV exists check failed:", err, "— allowing dispatch");
-    return false;
+    console.error("KV get failed:", err);
+    return null;
   }
 }
 
-async function markDispatched(key) {
+async function storeIncidentSession(incidentId, sessionId) {
   if (!redis) return;
   try {
-    await redis.set(key, "1");
+    await redis.set(`bridge:incident:${incidentId}`, sessionId, {
+      ex: INCIDENT_TTL_SECONDS,
+    });
   } catch (err) {
     console.error("KV set failed:", err);
   }
+}
+
+async function sendSessionMessage(sessionId, message) {
+  const url = `https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions/${sessionId}/messages`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${DEVIN_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ message }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    console.error(`Devin message API error: ${resp.status} ${text}`);
+    return { error: `${resp.status}: ${text}` };
+  }
+
+  const data = await resp.json();
+  console.log(`Message sent to session ${sessionId}`);
+  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,21 +258,40 @@ async function processAlert({
   dimensions,
   triggerValue,
 }) {
-  // Use incidentId for dedup — same across all firings (initial + reminders)
-  // of one incident, unique per genuinely new incident
-  const dedupKey = `bridge:dispatched:${alertId}`;
+  const timestamp = new Date().toISOString();
 
-  if (await isDuplicate(dedupKey)) {
-    console.log(`Duplicate alert (incidentId=${alertId}) for ${service} — skipping`);
-    return { status: "duplicate", incident_id: alertId };
+  // Check if this incident already has a Devin session
+  const existingSessionId = await getIncidentSession(alertId);
+
+  if (existingSessionId) {
+    // Reminder firing — message the existing session instead of creating a new one
+    console.log(`Incident ${alertId} already mapped to session ${existingSessionId} — sending update`);
+    const splunkContext = await fetchSplunkErrorContext(service);
+    const message = `⚠️ **Alert still firing** (${timestamp})
+
+**Severity:** ${severity}
+**Service:** ${service}
+**Trigger value:** ${triggerValue || "unknown"}
+
+### Latest Splunk APM error breakdown
+${formatSplunkContext(splunkContext)}
+
+The alert has not cleared. If you've already opened a PR, verify the fix addresses the issue. If not, continue investigating.`;
+
+    const msgResp = await sendSessionMessage(existingSessionId, message);
+    return {
+      status: msgResp.error ? "message_failed" : "message_sent",
+      incident_id: alertId,
+      session_id: existingSessionId,
+      devin: msgResp,
+    };
   }
 
+  // First firing — create a new Devin session
   const h = await errorHash(service, errorText);
   const errorType = errorText ? errorText.split("\n")[0].slice(0, 60) : "unknown";
   const branch = branchName(service, errorType, h);
-  const timestamp = new Date().toISOString();
 
-  // Enrich with live Splunk data if API token is available
   const splunkContext = await fetchSplunkErrorContext(service);
 
   const prompt = buildDevinPrompt({
@@ -267,14 +308,14 @@ async function processAlert({
     splunkContext,
   });
 
-  console.log(`Dispatching to Devin: service=${service} branch=${branch} hash=${h}`);
+  console.log(`Dispatching to Devin: service=${service} branch=${branch} incident=${alertId}`);
   const devinResp = await dispatchToDevin(prompt);
 
-  if (!devinResp.error) {
-    await markDispatched(dedupKey);
-    console.log(`Incident ${alertId} marked as dispatched (fire-once-per-incident)`);
+  if (!devinResp.error && devinResp.session_id) {
+    await storeIncidentSession(alertId, devinResp.session_id);
+    console.log(`Incident ${alertId} → session ${devinResp.session_id} (TTL 24h)`);
   } else {
-    console.warn(`Dispatch failed for incident ${alertId} — will allow retry on next firing`);
+    console.warn(`Dispatch failed for incident ${alertId} — will retry on next firing`);
   }
 
   return {
