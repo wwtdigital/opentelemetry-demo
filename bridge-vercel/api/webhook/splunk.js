@@ -180,7 +180,6 @@ async function dispatchToDevin(prompt) {
     body: JSON.stringify({
       prompt,
       idempotent: true,
-      advanced_mode: "create",
       ...(DEVIN_PLAYBOOK_ID ? { playbook_id: DEVIN_PLAYBOOK_ID } : {}),
     }),
   });
