@@ -30,24 +30,7 @@ SPLUNK_API_TOKEN = os.environ.get("SPLUNK_API_TOKEN", "")
 SPLUNK_REALM = os.environ.get("SPLUNK_REALM", "us1")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
-SERVICE_METADATA: dict[str, dict] = {
-    "product-catalog": {
-        "directory": "src/product-catalog",
-        "language": "Go",
-        "commands": [
-            "cd src/product-catalog",
-            r'rg -n "ListProducts|GetProduct|loadProductsFromDB|getProductFromDB|codes\.Internal|status\.Errorf|QueryContext|QueryRowContext|SELECT" main.go',
-            "go build ./...",
-        ],
-        "hints": [
-            "This service's main handlers and database helpers live in `src/product-catalog/main.go`.",
-            "For service-level error-rate spikes with sparse alert context, inspect `codes.Internal` paths before speculative refactors.",
-            "Homepage and product listing failures usually flow through `ListProducts` -> `loadProductsFromDB`.",
-            "Product detail failures usually flow through `GetProduct` -> `getProductFromDB`.",
-        ],
-        "verify_command": "cd src/product-catalog && go build ./...",
-    }
-}
+# No static service metadata — the playbook handles investigation methodology.
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -91,37 +74,6 @@ def _branch_name(service: str, error_type: str, h: str) -> str:
     safe_err = error_type.replace("/", "-").replace(" ", "-").lower()[:30]
     return f"fix/{safe_svc}-{safe_err}-{h[:6]}"
 
-
-def _default_commands(directory: str, language: str) -> list[str]:
-    if language == "Go":
-        return [
-            f"cd {directory}",
-            r'rg -n "Internal|status\.Errorf|SetStatus|QueryContext|QueryRowContext|SELECT|UPDATE|INSERT" .',
-            "go build ./...",
-        ]
-
-    return [
-        f"cd {directory}",
-        r'rg -n "error|exception|Internal|SELECT|UPDATE|INSERT|Query|status" .',
-    ]
-
-
-def _service_metadata(service: str) -> dict:
-    if service in SERVICE_METADATA:
-        return SERVICE_METADATA[service]
-
-    directory = f"src/{service}"
-    return {
-        "directory": directory,
-        "language": "unknown",
-        "commands": _default_commands(directory, "unknown"),
-        "hints": [
-            f"Start in `{directory}` and identify the request handlers, entrypoints, or worker loops for `{service}`.",
-            "When alert context is sparse, prove a chain of evidence from alert symptom -> handler -> helper -> exact failing line before changing code.",
-            "Prefer small logic/query/operator fixes over speculative type or architecture changes.",
-        ],
-        "verify_command": f"cd {directory}",
-    }
 
 
 def _fetch_splunk_error_context(service: str) -> dict | None:
@@ -185,18 +137,19 @@ def _fetch_splunk_error_context(service: str) -> dict | None:
 
 def _format_splunk_context(ctx: dict | None) -> str:
     if not ctx:
-        return ""
-    lines = ["\n### Splunk APM Error Context (live from API)"]
+        return "Splunk API returned no additional error breakdown."
+    lines: list[str] = []
     if ctx["operations"]:
-        lines.append(f"**Failing operations:** {', '.join(ctx['operations'])}")
+        lines.append(f"Failing operations: {', '.join(ctx['operations'])}")
     if ctx["endpoints"]:
-        lines.append(f"**Failing endpoints:** {', '.join(ctx['endpoints'])}")
+        lines.append(f"Failing endpoints: {', '.join(ctx['endpoints'])}")
     if ctx["error_types"]:
-        lines.append(f"**Error types observed:** {', '.join(ctx['error_types'])}")
+        lines.append(f"Error types: {', '.join(ctx['error_types'])}")
     if ctx["http_methods"]:
-        lines.append(f"**HTTP methods involved:** {', '.join(ctx['http_methods'])}")
-    lines.append(f"**Active error metric time series:** {ctx['mts_count']}")
-    return "\n".join(lines)
+        lines.append(f"HTTP methods: {', '.join(ctx['http_methods'])}")
+    if ctx.get("mts_count"):
+        lines.append(f"Active error metric time series: {ctx['mts_count']}")
+    return "\n".join(lines) if lines else "No error breakdown available."
 
 
 def _build_devin_prompt(
@@ -212,71 +165,30 @@ def _build_devin_prompt(
     trigger_value: str,
     splunk_context: dict | None = None,
 ) -> str:
-    metadata = _service_metadata(service)
-    commands = "\n".join(metadata["commands"])
-    hints = "\n".join(f"- {hint}" for hint in metadata["hints"])
     dimensions_json = json.dumps(dimensions or {}, indent=2, sort_keys=True)
 
-    return f"""## Production Error — Automated Resolution
+    return f"""## Production Alert
 
-**Detected by:** {source}
+**Source:** {source}
 **Detector:** {detector_name or "unknown"}
 **Service:** {service}
 **Severity:** {severity}
 **Timestamp:** {timestamp}
 **Alert ID:** {alert_id}
+**Trigger value:** {trigger_value or "unknown"}
 
-### Error Details
-```
+### Alert description
 {error_details}
-```
 
-### Incident Signal
-**Triggering value:** {trigger_value or "unknown"}
-
-```json
+### Dimensions
 {dimensions_json}
-```
 
-### Repository Context
-- Repo: {REPO_URL}
-- Branch to create: `{branch}`
-- Read first: `docs/DEVIN_CONTEXT.md`
-- Service directory: `{metadata["directory"]}`
-- Service language: {metadata["language"]}
-
-### Deterministic Investigation Method
-1. Read `docs/DEVIN_CONTEXT.md` before editing.
-2. Work in `{metadata["directory"]}` unless you find direct evidence the failure originates elsewhere.
-3. Identify the handler or entrypoint responsible for the failing behavior in this service.
-4. Search for code paths that can emit `Internal`, `5xx`, error spans, or failed queries for this service.
-5. Prove a chain of evidence from the alert symptom to a specific handler/helper and exact failing line before making changes.
-6. Prefer minimal logic/query/operator fixes over speculative refactors.
-7. If you cannot prove the root cause from the repo code, say so explicitly instead of guessing.
-
-### Recommended Commands
-```bash
-{commands}
-```
-
-### Service-Specific Hints
-{hints}
-
-### Deliverable
-1. Implement a minimal fix on branch `{branch}`.
-2. Verify with:
-   - `{metadata["verify_command"]}`
-3. Open a PR from `{branch}` → `main` with:
-   - Root cause analysis tied to exact code lines
-   - Why the previous hypotheses were rejected
-   - What the fix changes
-
-### Critical
-- Branch name MUST be exactly: `{branch}`
-- Keep the fix minimal
-- Do NOT modify config files, docker-compose files, feature flag definitions, or .env files
-- Do NOT invent production-only drift or hidden stack traces unless you can prove them from available evidence
+### Splunk APM error breakdown
 {_format_splunk_context(splunk_context)}
+
+### Task
+Fix the production bug in **{service}** in repo {REPO_URL}.
+Use branch `{branch}`.
 """
 
 

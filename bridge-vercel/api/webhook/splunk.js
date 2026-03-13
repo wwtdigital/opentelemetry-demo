@@ -16,24 +16,7 @@ const SPLUNK_WEBHOOK_SECRET = process.env.SPLUNK_WEBHOOK_SECRET || "";
 const SPLUNK_API_TOKEN = process.env.SPLUNK_API_TOKEN || "";
 const SPLUNK_REALM = process.env.SPLUNK_REALM || "us1";
 
-const SERVICE_METADATA = {
-  "product-catalog": {
-    directory: "src/product-catalog",
-    language: "Go",
-    commands: [
-      "cd src/product-catalog",
-      'rg -n "ListProducts|GetProduct|loadProductsFromDB|getProductFromDB|codes\\.Internal|status\\.Errorf|QueryContext|QueryRowContext|SELECT" main.go',
-      "go build ./...",
-    ],
-    hints: [
-      "This service's main handlers and database helpers live in `src/product-catalog/main.go`.",
-      "For service-level error-rate spikes with sparse alert context, inspect `codes.Internal` paths before speculative refactors.",
-      "Homepage and product listing failures usually flow through `ListProducts` -> `loadProductsFromDB`.",
-      "Product detail failures usually flow through `GetProduct` -> `getProductFromDB`.",
-    ],
-    verifyCommand: "cd src/product-catalog && go build ./...",
-  },
-};
+// No static service metadata — the playbook handles investigation methodology.
 
 // Vercel KV (Upstash Redis) — set automatically when you add KV store
 let redis = null;
@@ -67,41 +50,6 @@ function branchName(service, errorType, h) {
   const safeSvc = service.replace(/[/ ]/g, "-").toLowerCase();
   const safeErr = (errorType || "unknown").replace(/[/ ]/g, "-").toLowerCase().slice(0, 30);
   return `fix/${safeSvc}-${safeErr}-${h.slice(0, 6)}`;
-}
-
-function defaultCommands(directory, language) {
-  if (language === "Go") {
-    return [
-      `cd ${directory}`,
-      'rg -n "Internal|status\\.Errorf|SetStatus|QueryContext|QueryRowContext|SELECT|UPDATE|INSERT" .',
-      "go build ./...",
-    ];
-  }
-
-  return [
-    `cd ${directory}`,
-    'rg -n "error|exception|Internal|SELECT|UPDATE|INSERT|Query|status" .',
-  ];
-}
-
-function getServiceMetadata(service) {
-  const metadata = SERVICE_METADATA[service];
-  if (metadata) {
-    return metadata;
-  }
-
-  const directory = `src/${service}`;
-  return {
-    directory,
-    language: "unknown",
-    commands: defaultCommands(directory, "unknown"),
-    hints: [
-      `Start in \`${directory}\` and identify the request handlers, entrypoints, or worker loops for \`${service}\`.`,
-      "When alert context is sparse, prove a chain of evidence from alert symptom -> handler -> helper -> exact failing line before changing code.",
-      "Prefer small logic/query/operator fixes over speculative type or architecture changes.",
-    ],
-    verifyCommand: `cd ${directory}`,
-  };
 }
 
 async function fetchSplunkErrorContext(service) {
@@ -161,18 +109,19 @@ async function fetchSplunkErrorContext(service) {
 }
 
 function formatSplunkContext(ctx) {
-  if (!ctx) return "";
-  const lines = ["\n### Splunk APM Error Context (live from API)"];
+  if (!ctx) return "Splunk API returned no additional error breakdown.";
+  const lines = [];
   if (ctx.operations.length > 0)
-    lines.push(`**Failing operations:** ${ctx.operations.join(", ")}`);
+    lines.push(`Failing operations: ${ctx.operations.join(", ")}`);
   if (ctx.endpoints.length > 0)
-    lines.push(`**Failing endpoints:** ${ctx.endpoints.join(", ")}`);
+    lines.push(`Failing endpoints: ${ctx.endpoints.join(", ")}`);
   if (ctx.errorTypes.length > 0)
-    lines.push(`**Error types observed:** ${ctx.errorTypes.join(", ")}`);
+    lines.push(`Error types: ${ctx.errorTypes.join(", ")}`);
   if (ctx.httpMethods.length > 0)
-    lines.push(`**HTTP methods involved:** ${ctx.httpMethods.join(", ")}`);
-  lines.push(`**Active error metric time series:** ${ctx.mtsCount}`);
-  return lines.join("\n");
+    lines.push(`HTTP methods: ${ctx.httpMethods.join(", ")}`);
+  if (ctx.mtsCount)
+    lines.push(`Active error metric time series: ${ctx.mtsCount}`);
+  return lines.length > 0 ? lines.join("\n") : "No error breakdown available.";
 }
 
 function buildDevinPrompt({
@@ -188,71 +137,30 @@ function buildDevinPrompt({
   triggerValue,
   splunkContext,
 }) {
-  const metadata = getServiceMetadata(service);
-  const commands = metadata.commands.join("\n");
-  const hints = metadata.hints.map((hint) => `- ${hint}`).join("\n");
   const dimensionsJson = JSON.stringify(dimensions || {}, null, 2);
 
-  return `## Production Error — Automated Resolution
+  return `## Production Alert
 
-**Detected by:** ${source}
+**Source:** ${source}
 **Detector:** ${detectorName || "unknown"}
 **Service:** ${service}
 **Severity:** ${severity}
 **Timestamp:** ${timestamp}
 **Alert ID:** ${alertId}
+**Trigger value:** ${triggerValue || "unknown"}
 
-### Error Details
-\`\`\`
+### Alert description
 ${errorDetails}
-\`\`\`
 
-### Incident Signal
-**Triggering value:** ${triggerValue || "unknown"}
-
-\`\`\`json
+### Dimensions
 ${dimensionsJson}
-\`\`\`
 
-### Repository Context
-- Repo: ${REPO_URL}
-- Branch to create: \`${branch}\`
-- Read first: \`docs/DEVIN_CONTEXT.md\`
-- Service directory: \`${metadata.directory}\`
-- Service language: ${metadata.language}
-
-### Deterministic Investigation Method
-1. Read \`docs/DEVIN_CONTEXT.md\` before editing.
-2. Work in \`${metadata.directory}\` unless you find direct evidence the failure originates elsewhere.
-3. Identify the handler or entrypoint responsible for the failing behavior in this service.
-4. Search for code paths that can emit \`Internal\`, \`5xx\`, error spans, or failed queries for this service.
-5. Prove a chain of evidence from the alert symptom to a specific handler/helper and exact failing line before making changes.
-6. Prefer minimal logic/query/operator fixes over speculative refactors.
-7. If you cannot prove the root cause from the repo code, say so explicitly instead of guessing.
-
-### Recommended Commands
-\`\`\`bash
-${commands}
-\`\`\`
-
-### Service-Specific Hints
-${hints}
-
-### Deliverable
-1. Implement a minimal fix on branch \`${branch}\`.
-2. Verify with:
-   - \`${metadata.verifyCommand}\`
-3. Open a PR from \`${branch}\` → \`main\` with:
-   - Root cause analysis tied to exact code lines
-   - Why the previous hypotheses were rejected
-   - What the fix changes
-
-### Critical
-- Branch name MUST be exactly: \`${branch}\`
-- Keep the fix minimal
-- Do NOT modify config files, docker-compose files, feature flag definitions, or .env files
-- Do NOT invent production-only drift or hidden stack traces unless you can prove them from available evidence
+### Splunk APM error breakdown
 ${formatSplunkContext(splunkContext)}
+
+### Task
+Fix the production bug in **${service}** in repo ${REPO_URL}.
+Use branch \`${branch}\`.
 `;
 }
 
